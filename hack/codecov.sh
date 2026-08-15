@@ -23,11 +23,11 @@ rm -f "${COVER_PROFILE}.tmp"
 # Configure the git refs and job link based on how the job was triggered via prow
 if [[ "${JOB_TYPE}" == "presubmit" ]]; then
        echo "detected PR code coverage job for #${PULL_NUMBER}"
-       REF_FLAGS="-P ${PULL_NUMBER} -C ${PULL_PULL_SHA}"
+       REF_FLAGS="--pr ${PULL_NUMBER} --commit-sha ${PULL_PULL_SHA}"
        JOB_LINK="${CI_SERVER_URL}/pr-logs/pull/${REPO_OWNER}_${REPO_NAME}/${PULL_NUMBER}/${JOB_NAME}/${BUILD_ID}"
 elif [[ "${JOB_TYPE}" == "postsubmit" ]]; then
        echo "detected branch code coverage job for ${PULL_BASE_REF}"
-       REF_FLAGS="-B ${PULL_BASE_REF} -C ${PULL_BASE_SHA}"
+       REF_FLAGS="--branch ${PULL_BASE_REF} --commit-sha ${PULL_BASE_SHA}"
        JOB_LINK="${CI_SERVER_URL}/logs/${JOB_NAME}/${BUILD_ID}"
 elif [[ "${JOB_TYPE}" == "local" ]]; then
        echo "coverage report available at ${COVER_PROFILE}"
@@ -47,8 +47,31 @@ if [[ "${JOB_TYPE}" != "local" ]]; then
               echo '${ARTIFACT_DIR} must be set for non-local jobs, and must point to a writable directory' >&2
               exit 1
        fi
-       curl -sS https://codecov.io/bash -o "${ARTIFACT_DIR}/codecov.sh"
-       bash <(cat "${ARTIFACT_DIR}/codecov.sh") -Z -K -f "${COVER_PROFILE}" -r "${REPO_OWNER}/${REPO_NAME}" ${REF_FLAGS}
+
+       CODECOV_BIN="${ARTIFACT_DIR}/codecov"
+
+       # Download the Codecov CLI binary with integrity verification.
+       # See https://docs.codecov.com/docs/codecov-uploader#integrity-checking-the-codecov-cli
+       curl -sSf https://cli.codecov.io/latest/linux/codecov -o "${CODECOV_BIN}"
+       curl -sSf https://cli.codecov.io/latest/linux/codecov.SHA256SUM -o "${CODECOV_BIN}.SHA256SUM"
+       curl -sSf https://cli.codecov.io/latest/linux/codecov.SHA256SUM.sig -o "${CODECOV_BIN}.SHA256SUM.sig"
+
+       # GPG signature verification (requires gpg; skipped if unavailable)
+       if command -v gpgv >/dev/null 2>&1 && command -v gpg >/dev/null 2>&1; then
+              curl -sSf https://keybase.io/codecovsecops/pgp_keys.asc \
+                     | gpg --no-default-keyring --keyring trustedkeys.gpg --import 2>/dev/null
+              gpgv "${CODECOV_BIN}.SHA256SUM.sig" "${CODECOV_BIN}.SHA256SUM"
+       else
+              echo "warning: gpg not available, skipping signature verification" >&2
+       fi
+
+       # SHA256 checksum verification (always required)
+       (cd "${ARTIFACT_DIR}" && sha256sum -c codecov.SHA256SUM)
+
+       chmod +x "${CODECOV_BIN}"
+
+       "${CODECOV_BIN}" upload-process --fail-on-error \
+              --file "${COVER_PROFILE}" --slug "${REPO_OWNER}/${REPO_NAME}" ${REF_FLAGS}
 else
-       bash <(curl -s https://codecov.io/bash) -Z -K -f "${COVER_PROFILE}" -r "${REPO_OWNER}/${REPO_NAME}" ${REF_FLAGS}
+       echo "coverage report available at ${COVER_PROFILE} (no upload in local mode)"
 fi
